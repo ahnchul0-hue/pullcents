@@ -1,4 +1,4 @@
-# PullCents 구현 계획 (plan.md)
+# 값뚝 구현 계획 (plan.md)
 
 > **상태: DRAFT v0.3**
 > 작성일: 2026-03-01 | 갱신: 2026-03-01
@@ -86,7 +86,7 @@ M1 시작 **전에** 병렬로 진행해야 하는 항목:
 | 4 | **Apple Developer Program** ($99/년) | 1~2일 | ⬜ 미가입 |
 | 5 | **APNs P8 인증 키** 생성 | Apple 가입 후 즉시 | ⬜ |
 | 6 | **네이버 검색 API 키** 신청 | 즉시 | ⬜ |
-| 7 | **도메인 구매** (pullcents.com 등) | 즉시 | ⬜ 미확보 |
+| 7 | **도메인 구매** (gapttuk.com 등) | 즉시 | ⬜ 미확보 |
 | 8 | **Sentry 프로젝트** 생성 (무료 플랜) | 즉시 | ⬜ |
 | 9 | **PostgreSQL 17.9** 설치 확인 | - | ✅ 완료 |
 
@@ -97,7 +97,7 @@ M1 시작 **전에** 병렬로 진행해야 하는 항목:
 ## 2. 프로젝트 구조
 
 ```
-pullcents/
+gapttuk/                             # 값뚝 프로젝트 루트
 ├── documents/                    # 설계 문서 (기존)
 ├── scripts/                      # 유틸리티 스크립트 (기존)
 │
@@ -610,15 +610,15 @@ Retry-After: 30  (429 응답 시)
 
 | 환경 | DB 이름 | 용도 | .env 전환 |
 |------|---------|------|----------|
-| **dev** | `pullcents_dev` | 로컬 개발. 테스트 데이터 자유 생성/삭제 | `DATABASE_URL=...pullcents_dev` |
-| **test** | `pullcents_test` | 자동 테스트 전용. 트랜잭션 롤백으로 격리 | 테스트 코드에서 자동 전환 |
-| **prod** | `pullcents` | 실서비스 운영. pg_dump 백업 대상 | `DATABASE_URL=...pullcents` |
+| **dev** | `gapttuk_dev` | 로컬 개발. 테스트 데이터 자유 생성/삭제 | `DATABASE_URL=...gapttuk_dev` |
+| **test** | `gapttuk_test` | 자동 테스트 전용. 트랜잭션 롤백으로 격리 | 테스트 코드에서 자동 전환 |
+| **prod** | `gapttuk` | 실서비스 운영. pg_dump 백업 대상 | `DATABASE_URL=...gapttuk` |
 
 - `.env.dev`, `.env.prod` 분리. 서버 시작 시 `--env` 플래그 또는 `APP_ENV` 환경변수로 전환
 - 모든 `.env*` 파일은 `.gitignore` 처리
 
 ### 테스트 DB
-- `pullcents_test` 별도 DB 사용
+- `gapttuk_test` 별도 DB 사용
 - 각 통합 테스트는 트랜잭션 내 실행 → 롤백 (테스트 간 격리)
 
 ---
@@ -638,8 +638,8 @@ Retry-After: 30  (429 응답 시)
 ### pg_dump 백업 크론
 
 ```bash
-# /etc/cron.d/pullcents-backup
-0 3 * * * postgres pg_dump pullcents | gzip > /home/user/backups/pullcents_$(date +\%Y\%m\%d).sql.gz
+# /etc/cron.d/gapttuk-backup
+0 3 * * * postgres pg_dump gapttuk | gzip > /home/user/backups/gapttuk_$(date +\%Y\%m\%d).sql.gz
 # 7일 이전 삭제
 0 4 * * * find /home/user/backups/ -name "*.sql.gz" -mtime +7 -delete
 ```

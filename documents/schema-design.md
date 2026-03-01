@@ -1,4 +1,4 @@
-# PullCents DB 스키마 설계
+# 값뚝 DB 스키마 설계
 
 > **상태: DRAFT v0.4**
 > 작성일: 2026-03-01 | 갱신: 2026-03-01
@@ -254,7 +254,7 @@ v0.1과 동일. keyword + category_id(선택) + max_price(선택)
 | updated_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | |
 
 **설계 근거:**
-- PullCents "센트(¢)" 보상 화폐 — 기프티콘 교환 가능한 실질 가치
+- 값뚝 "센트(¢)" 보상 화폐 — 기프티콘 교환 가능한 실질 가치
 - `balance`는 `users.point_balance`와 동기화 (이중 캐시로 빠른 조회)
 - 센트 획득/사용은 모두 point_transactions에 기록
 

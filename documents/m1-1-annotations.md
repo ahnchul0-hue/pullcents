@@ -12,7 +12,7 @@
 
 ```
 [package]
-name = "pullcents-server"
+name = "gapttuk-server"
 edition = "2021"
 # Rust 최소 버전: 1.75+ (async fn in trait 지원)
 
@@ -128,9 +128,9 @@ edition = "2021"
 
 | APP_ENV | DB 이름 | 비고 |
 |---------|---------|------|
-| dev | `pullcents_dev` | 개발용 |
-| test | `pullcents_test` | 테스트 (트랜잭션 롤백) |
-| prod | `pullcents` | 운영 |
+| dev | `gapttuk_dev` | 개발용 |
+| test | `gapttuk_test` | 테스트 (트랜잭션 롤백) |
+| prod | `gapttuk` | 운영 |
 
 ---
 
@@ -592,7 +592,7 @@ DELETE FROM shopping_malls;
 
 ### 마이그레이션 실행 순서
 
-1. `pullcents_dev` DB 생성 (없으면)
+1. `gapttuk_dev` DB 생성 (없으면)
 2. `sqlx migrate run` — 001 + 002 순차 실행
 3. `sqlx prepare` — 오프라인 모드 캐시 생성 (sqlx-data.json)
 4. `cargo build` — 컴파일타임 SQL 검증 통과 확인
