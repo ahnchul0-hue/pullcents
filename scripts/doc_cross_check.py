@@ -266,7 +266,7 @@ def main():
         "daily_checkins": ["DAILY_CHECKIN"],
         "events": ["EVENT"],
         "popular_searches": ["HOME"],
-        "subscriptions": ["SUBSCRIPTION"],
+        "roulette_results": ["REWARDS"],
     }
     for table, expected in table_to_screens.items():
         for scr in expected:
@@ -275,12 +275,14 @@ def main():
 
     # ── E. PRD 누락 기능 (스키마/UI에는 있음) ──
     prd_check = {
-        "포인트": "포인트/보상 시스템",
+        "센트": "센트(¢) 보상 시스템",
         "출석": "출석체크",
         "추천 코드": "친구 초대/추천 보상",
         "카드 할인": "카드 할인가",
         "봇": "봇 차단/보안",
         "CAPTCHA": "CAPTCHA",
+        "룰렛": "확률형 룰렛",
+        "기프티콘": "기프티콘 교환",
     }
     prd_lower = prd.lower()
     for keyword, label in prd_check.items():
@@ -305,7 +307,7 @@ def main():
             warnings.append("[PRD↔기술] 봇 차단/CAPTCHA가 tech-stack에는 있지만 PRD 기술 인프라에 없음")
 
     # ── G. v0.1 참조 테이블 상세 컬럼 확인 ──
-    v01_only = {"price_alerts", "keyword_alerts", "subscriptions", "categories", "user_favorites", "shopping_malls"}
+    v01_only = {"price_alerts", "keyword_alerts", "categories", "user_favorites", "shopping_malls"}
     for t in sorted(v01_only):
         has_detail = t in detail_tables
         if not has_detail:

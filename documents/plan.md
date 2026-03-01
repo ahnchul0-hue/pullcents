@@ -1,21 +1,100 @@
 # PullCents 구현 계획 (plan.md)
 
-> **상태: DRAFT v0.1**
+> **상태: DRAFT v0.2**
 > 작성일: 2026-03-01 | 갱신: 2026-03-01
-> 근거 문서: prd.md v0.3 | schema-design.md v0.3 | ui-architecture.md v0.2 | tech-stack-research.md
+> 근거 문서: prd.md v0.4 | schema-design.md v0.3 | ui-architecture.md v0.2 | tech-stack-research.md
 > **이 문서는 STEP 2 계획 단계입니다. 아직 구현하지 마.**
 
 ---
 
 ## ⛔️ DO NOT TOUCH
 
-- `documents/` — 설계 문서. plan.md를 제외한 파일은 수정하지 않는다
+- `documents/` — 설계 문서 (plan.md 제외)
 - `scripts/doc_cross_check.py` — 교차 검증 스크립트
 - `.claude/` — AI 설정 및 메모리
 
 ---
 
-## 1. 프로젝트 구조
+## 0. 시스템 아키텍처
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        사용자                                    │
+│              (Android / iOS / Web 브라우저)                       │
+└──────────────┬──────────────────────────────┬───────────────────┘
+               │ HTTPS                        │ 푸시
+               ▼                              │
+┌──────────────────────────────┐              │
+│     Flutter App (Dart)       │              │
+│  ┌────────┐ ┌──────┐ ┌────┐ │              │
+│  │Riverpod│ │  dio │ │ fl │ │              │
+│  │Provider│ │Client│ │chart│ │              │
+│  └────────┘ └──┬───┘ └────┘ │              │
+└────────────────┼─────────────┘              │
+                 │ REST API (JSON)             │
+                 ▼                             │
+┌──────────────────────────────────────────────┼──────────────────┐
+│              Axum Server (Rust)               │                  │
+│                                               │                  │
+│  ┌─────────────────────────────────────────┐ │                  │
+│  │  Middleware                              │ │                  │
+│  │  ┌──────┐ ┌───────────┐ ┌────────────┐ │ │                  │
+│  │  │ JWT  │ │rate_limit │ │ bot_guard  │ │ │                  │
+│  │  │ Auth │ │(tower-gov)│ │(blocked_ip)│ │ │                  │
+│  │  └──────┘ └───────────┘ └────────────┘ │ │                  │
+│  └─────────────────────────────────────────┘ │                  │
+│                                               │                  │
+│  ┌──────────┐ ┌──────────┐ ┌──────────────┐ │                  │
+│  │ Routes   │ │ Services │ │  Crawlers    │ │                  │
+│  │ (API)    │→│ (로직)   │ │  (cron)      │ │                  │
+│  └──────────┘ └────┬─────┘ └──────┬───────┘ │                  │
+│                    │              │           │                  │
+│  ┌─────────┐       │              │           │  ┌────────────┐ │
+│  │  moka   │       │              │           │  │   Push      │ │
+│  │ (cache) │       │              │           │  │ ┌────┐┌───┐│ │
+│  └─────────┘       │              │           │  │ │APNs││FCM││ │
+│                    │              │           │  │ └────┘└───┘│ │
+│                    ▼              ▼           │  └──────┬─────┘ │
+│            ┌───────────────┐ ┌────────────┐  │         │       │
+│            │   SQLx        │ │ reqwest +  │  │         │       │
+│            │  (PostgreSQL) │ │ scraper    │  │         │       │
+│            └───────┬───────┘ └─────┬──────┘  │         │       │
+└────────────────────┼───────────────┼─────────┘         │       │
+                     ▼               ▼                    ▼
+              ┌────────────┐  ┌──────────────┐   ┌──────────────┐
+              │PostgreSQL  │  │ 쿠팡/네이버  │   │ APNs / FCM   │
+              │17.9 (로컬) │  │  외부 서버   │   │   (외부)     │
+              └────────────┘  └──────────────┘   └──────────────┘
+```
+
+**데이터 플로우:**
+1. **사용자 → 앱 → API**: 검색/알림 설정/즐겨찾기 등 CRUD
+2. **크롤러 → 외부 → DB**: 6시간마다 가격 수집 → price_history INSERT → products 갱신
+3. **크롤러 → 알림 평가 → 푸시**: 가격 변동 감지 → 활성 알림 조건 체크 → APNs/FCM 발송
+
+---
+
+## 1. 사전 준비 체크리스트 (M0)
+
+M1 시작 **전에** 병렬로 진행해야 하는 항목:
+
+| # | 항목 | 리드타임 | 상태 |
+|---|------|---------|------|
+| 1 | **쿠팡파트너스 API 키 신청** | 2~4주 | ⬜ 미신청 |
+| 2 | **카카오 개발자 앱 등록** (소셜 로그인) | 1~3일 | ⬜ |
+| 3 | **Google Cloud 프로젝트** (OAuth + FCM) | 1일 | ⬜ |
+| 4 | **Apple Developer Program** ($99/년) | 1~2일 | ⬜ 미가입 |
+| 5 | **APNs P8 인증 키** 생성 | Apple 가입 후 즉시 | ⬜ |
+| 6 | **네이버 검색 API 키** 신청 | 즉시 | ⬜ |
+| 7 | **도메인 구매** (pullcents.com 등) | 즉시 | ⬜ 미확보 |
+| 8 | **Sentry 프로젝트** 생성 (무료 플랜) | 즉시 | ⬜ |
+| 9 | **PostgreSQL 17.9** 설치 확인 | - | ✅ 완료 |
+
+> **블로커:** #1 쿠팡파트너스가 승인되지 않으면 M1-6(크롤링)에서 API 연동 불가. 즉시 신청 필수.
+
+---
+
+## 2. 프로젝트 구조
 
 ```
 pullcents/
@@ -27,365 +106,387 @@ pullcents/
 │   ├── .env                      # DB_URL, API 키 등 (gitignore)
 │   ├── sqlx-data.json            # SQLx 오프라인 모드 캐시
 │   ├── migrations/               # SQLx 마이그레이션
-│   │   ├── 001_initial_schema.sql
-│   │   ├── 002_seed_data.sql
-│   │   └── ...
 │   ├── src/
-│   │   ├── main.rs               # 진입점: Axum 서버 + graceful shutdown
-│   │   ├── config.rs             # 환경변수 파싱 (envy 또는 dotenvy)
-│   │   ├── error.rs              # 통합 에러 타입 (thiserror)
+│   │   ├── main.rs               # 진입점 + graceful shutdown
+│   │   ├── config.rs             # 환경변수 (dotenvy)
+│   │   ├── error.rs              # 통합 에러 (thiserror + IntoResponse)
+│   │   ├── cache.rs              # moka 인메모리 캐시 관리
 │   │   ├── db/
 │   │   │   ├── mod.rs            # PgPool 초기화
 │   │   │   └── models/           # SQLx 모델 (FromRow)
-│   │   │       ├── user.rs
-│   │   │       ├── product.rs
-│   │   │       ├── price_history.rs
-│   │   │       ├── alert.rs      # price_alerts + category_alerts + keyword_alerts
-│   │   │       ├── notification.rs
-│   │   │       ├── point.rs      # user_points + point_transactions
-│   │   │       ├── reward.rs     # referrals + daily_checkins
-│   │   │       ├── event.rs      # events + event_participations
-│   │   │       ├── card_discount.rs
-│   │   │       ├── ai_prediction.rs
-│   │   │       └── mod.rs
 │   │   ├── api/
-│   │   │   ├── mod.rs            # Router 조합
-│   │   │   ├── middleware/
-│   │   │   │   ├── auth.rs       # JWT 검증 미들웨어
-│   │   │   │   ├── rate_limit.rs # tower-governor
-│   │   │   │   └── bot_guard.rs  # blocked_ips 조회 + UA 필터
-│   │   │   └── routes/
-│   │   │       ├── auth.rs       # POST /auth/login, /auth/signup
-│   │   │       ├── products.rs   # GET /products/:id, /products/search
-│   │   │       ├── prices.rs     # GET /products/:id/history
-│   │   │       ├── alerts.rs     # CRUD /alerts/price, /alerts/category, /alerts/keyword
-│   │   │       ├── favorites.rs  # CRUD /favorites
-│   │   │       ├── notifications.rs
-│   │   │       ├── points.rs     # GET /points, /points/transactions
-│   │   │       ├── rewards.rs    # POST /checkin, GET /referrals
-│   │   │       ├── events.rs     # GET /events, POST /events/:id/participate
-│   │   │       └── health.rs     # GET /health
-│   │   ├── services/
-│   │   │   ├── auth_service.rs   # 소셜 로그인 (카카오/구글/애플)
-│   │   │   ├── product_service.rs
-│   │   │   ├── price_service.rs  # 가격 이력 집계, 통계 계산
-│   │   │   ├── alert_service.rs  # 알림 평가 + 발송 트리거
-│   │   │   ├── notification_service.rs
-│   │   │   ├── point_service.rs  # 포인트 적립/차감 트랜잭션
-│   │   │   └── prediction_service.rs
-│   │   ├── crawlers/
-│   │   │   ├── mod.rs
-│   │   │   ├── coupang.rs        # 쿠팡파트너스 API + reqwest
-│   │   │   ├── naver.rs          # 네이버 검색 API (lprice/hprice)
-│   │   │   └── scheduler.rs     # tokio-cron-scheduler 기반 주기 실행
-│   │   └── push/
-│   │       ├── mod.rs
-│   │       ├── apns.rs           # a2 크레이트 (iOS)
-│   │       └── fcm.rs            # fcm 크레이트 (Android)
+│   │   │   ├── mod.rs            # Router 조합 (/api/v1/ 프리픽스)
+│   │   │   ├── pagination.rs     # Cursor 기반 페이지네이션 공통 구조
+│   │   │   ├── middleware/       # auth, rate_limit, bot_guard
+│   │   │   └── routes/           # 엔드포인트별 핸들러
+│   │   ├── services/             # 비즈니스 로직
+│   │   ├── crawlers/             # 쿠팡/네이버 크롤링 + 스케줄러
+│   │   └── push/                 # APNs (a2) + FCM (fcm)
 │   └── tests/
-│       ├── api/                  # 통합 테스트
-│       └── services/             # 서비스 단위 테스트
+│       ├── api/                  # 통합 테스트 (실제 DB)
+│       └── services/             # 단위 테스트
 │
-├── app/                          # Flutter 프론트엔드 (Android + iOS + Web)
+├── app/                          # Flutter (Android + iOS + Web)
 │   ├── pubspec.yaml
 │   ├── lib/
-│   │   ├── main.dart             # 진입점 + 라우터 설정
-│   │   ├── config/
-│   │   │   ├── routes.dart       # GoRouter 경로 정의
-│   │   │   ├── theme.dart        # 라이트/다크 테마
-│   │   │   └── constants.dart    # API URL, 제한값 등
-│   │   ├── models/               # 데이터 모델 (freezed)
-│   │   │   ├── user.dart
-│   │   │   ├── product.dart
-│   │   │   ├── price_history.dart
-│   │   │   ├── alert.dart
-│   │   │   ├── notification.dart
-│   │   │   └── point.dart
+│   │   ├── main.dart
+│   │   ├── config/               # routes, theme, constants
+│   │   ├── models/               # freezed 데이터 모델
 │   │   ├── providers/            # Riverpod 상태관리
-│   │   │   ├── auth_provider.dart
-│   │   │   ├── product_provider.dart
-│   │   │   ├── alert_provider.dart
-│   │   │   ├── favorites_provider.dart
-│   │   │   └── notification_provider.dart
-│   │   ├── services/             # API 호출 (dio)
-│   │   │   ├── api_client.dart   # dio 인스턴스 + 인터셉터
-│   │   │   ├── auth_service.dart
-│   │   │   ├── product_service.dart
-│   │   │   └── alert_service.dart
-│   │   ├── screens/              # 22개 화면 (ui-architecture.md 기반)
+│   │   ├── services/             # dio API 호출
+│   │   ├── screens/              # 21개 화면 (SUBSCRIPTION 제거)
 │   │   │   ├── home/
-│   │   │   │   ├── home_screen.dart
-│   │   │   │   └── widgets/     # 인기검색어, 상품카드, 필터바
 │   │   │   ├── product/
-│   │   │   │   ├── product_detail_screen.dart
-│   │   │   │   └── widgets/     # 가격 차트, AI 예측, 카드 할인
 │   │   │   ├── search/
-│   │   │   │   ├── search_screen.dart
-│   │   │   │   └── search_result_screen.dart
-│   │   │   ├── alert/
-│   │   │   │   ├── alert_center_screen.dart
-│   │   │   │   ├── alert_setting_screen.dart
-│   │   │   │   ├── keyword_alert_screen.dart
-│   │   │   │   └── category_alert_screen.dart
+│   │   │   ├── alert/            # center, setting, keyword, category
 │   │   │   ├── favorites/
-│   │   │   │   └── favorites_screen.dart
-│   │   │   ├── rewards/
-│   │   │   │   ├── rewards_screen.dart
-│   │   │   │   ├── referral_screen.dart
-│   │   │   │   └── daily_checkin_screen.dart
-│   │   │   ├── auth/
-│   │   │   │   ├── login_screen.dart
-│   │   │   │   └── signup_screen.dart
-│   │   │   ├── profile/
-│   │   │   │   ├── my_page_screen.dart
-│   │   │   │   ├── subscription_screen.dart
-│   │   │   │   └── settings_screen.dart
+│   │   │   ├── rewards/          # rewards, referral, daily_checkin
+│   │   │   ├── auth/             # login, signup
+│   │   │   ├── profile/          # my_page, settings
 │   │   │   ├── event/
-│   │   │   │   └── event_screen.dart
 │   │   │   ├── onboarding/
-│   │   │   │   └── onboarding_screen.dart
-│   │   │   └── web/
-│   │   │       ├── web_landing_screen.dart
-│   │   │       └── share_preview_screen.dart
+│   │   │   └── web/              # landing, share_preview
 │   │   └── widgets/              # 공용 위젯
-│   │       ├── product_card.dart
-│   │       ├── price_chart.dart  # fl_chart 래퍼
-│   │       ├── filter_bar.dart
-│   │       ├── sort_selector.dart
-│   │       └── loading_indicator.dart
 │   └── test/
 │
-└── .github/                      # (추후) CI/CD
+├── backups/                      # pg_dump 일일 백업 (gitignore)
+└── .github/workflows/            # CI/CD (M3 전에 구성)
 ```
 
 ---
 
-## 2. 라이브러리 버전 (확정 후 고정)
+## 3. 라이브러리 버전
 
-### 2.1 Rust (server/Cargo.toml)
+### Rust (server/Cargo.toml)
 
-| 크레이트 | 용도 | 확인할 최신 버전 |
-|----------|------|-----------------|
+| 크레이트 | 용도 | 버전 |
+|----------|------|------|
 | axum | HTTP 프레임워크 | 0.8.x |
 | tokio | 비동기 런타임 | 1.x |
-| sqlx | DB (PostgreSQL) | 0.8.x |
+| sqlx | PostgreSQL ORM | 0.8.x |
 | serde / serde_json | 직렬화 | 1.x |
-| jsonwebtoken | JWT 인증 | 9.x |
-| reqwest | HTTP 클라이언트 (크롤링) | 0.12.x |
+| jsonwebtoken | JWT | 9.x |
+| reqwest | HTTP 클라이언트 | 0.12.x |
 | scraper | HTML 파싱 | 0.22.x |
 | tower-governor | Rate Limiting | 0.6.x |
 | tokio-cron-scheduler | 스케줄러 | 0.13.x |
 | a2 | APNs 푸시 | 0.10.x |
 | fcm | FCM 푸시 | 0.9.x |
-| dotenvy | .env 로딩 | 0.15.x |
+| **moka** | **인메모리 캐시** | 0.12.x |
+| **sentry** | **에러 트래킹** | 0.35.x |
+| dotenvy | .env | 0.15.x |
 | thiserror | 에러 타입 | 2.x |
 | tracing | 로깅 | 0.1.x |
 | uuid | ID 생성 | 1.x |
 | chrono | 날짜/시간 | 0.4.x |
 
-### 2.2 Flutter (app/pubspec.yaml)
+### Flutter (app/pubspec.yaml)
 
-| 패키지 | 용도 | 확인할 최신 버전 |
-|--------|------|-----------------|
+| 패키지 | 용도 | 버전 |
+|--------|------|------|
 | flutter_riverpod | 상태관리 | 2.x |
 | go_router | 라우팅 | 14.x |
 | dio | HTTP 클라이언트 | 5.x |
 | fl_chart | 가격 차트 | 0.70.x |
 | freezed / json_serializable | 모델 코드 생성 | 2.x / 6.x |
 | flutter_secure_storage | 토큰 저장 | 9.x |
-| firebase_messaging | FCM 수신 (Android) | 15.x |
+| firebase_messaging | FCM 수신 | 15.x |
 | cached_network_image | 이미지 캐싱 | 3.x |
 | shimmer | 로딩 스켈레톤 | 3.x |
-| intl | 국제화 (숫자 포맷) | 0.19.x |
+| intl | 숫자 포맷 | 0.19.x |
+| **sentry_flutter** | **에러 트래킹** | 8.x |
 
-> **주의**: 구현 직전에 `cargo search` / `pub.dev` 에서 실제 최신 버전 확인 후 확정할 것.
+> 구현 직전 `cargo search` / `pub.dev`에서 실제 최신 버전 확인 후 확정.
 
 ---
 
-## 3. 마일스톤
+## 4. 리스크 레지스터
 
-### 마일스톤 원칙
-- **한 번에 하나만** — 마일스톤 완료 → Git 커밋 → 다음 마일스톤
-- **3번 실패 → Git 롤백 → 범위 축소 재시도**
+| # | 리스크 | 확률 | 영향 | 대응 |
+|---|--------|------|------|------|
+| R1 | **쿠팡 크롤링 차단** (IP 차단/구조 변경) | 높음 | 치명적 | UA 로테이션 + 랜덤 딜레이(3~10초) + reqwest 우선, 필요 시 headless 전환. 최악 시 네이버 전용 전환 |
+| R2 | **쿠팡파트너스 API 승인 지연** | 중간 | 높음 | 즉시 신청. 승인 전에는 딥링크 없이 일반 URL로 개발. 승인 후 교체 |
+| R3 | **Apple 앱 심사 리젝** (가격 추적 앱 제한) | 중간 | 높음 | 심사 가이드라인 사전 검토. 리젝 시 사유별 대응 (웹앱 대안 보유) |
+| R4 | **Flutter Web 성능** (초기 로드 3~5MB) | 높음 | 중간 | deferred loading + 이미지 lazy load. 치명적이면 웹은 별도 경량 SPA 검토 |
+| R5 | **1인 개발 병목** | 높음 | 중간 | AI 보조로 생산성 극대화. 범위 초과 시 M5 기능 과감히 축소 |
+| R6 | **로컬 서버 장애** (정전/네트워크) | 중간 | 높음 | pg_dump 일일 백업 + UPS 검토. 치명적이면 VPS 이전 |
+
+---
+
+## 5. 캐싱 전략 (moka 인메모리)
+
+> **원칙: Redis 사용하지 않음.** PostgreSQL + moka 인메모리 캐시만 사용.
+
+| 대상 | 캐시 TTL | 근거 |
+|------|---------|------|
+| **blocked_ips** | 5분 | 매 요청 DB 조회 방지. 5분마다 갱신 |
+| **categories** | 1시간 | 거의 불변. 서버 시작 시 로드 |
+| **popular_searches** | 10분 | 주기적 집계 결과. 높은 조회 빈도 |
+| **상품 상세** | 5분 | 동일 상품 반복 조회 대응 |
+| **카테고리 알림 목록** | 5분 | 크롤러가 알림 평가 시 반복 조회 |
+
+```rust
+// moka 캐시 구조 예시 (의사코드)
+struct AppCache {
+    blocked_ips: Cache<IpAddr, BlockedIp>,       // TTL 5분
+    categories: Cache<i32, Category>,             // TTL 1시간
+    popular_searches: Cache<(), Vec<PopularSearch>>, // TTL 10분
+    products: Cache<i64, Product>,                // TTL 5분, 최대 10,000건
+}
+```
+
+---
+
+## 6. 크롤링 상세 설계
+
+### 6.1 데이터 소스
+
+| 소스 | 용도 | 방식 |
+|------|------|------|
+| 쿠팡파트너스 API | 상품 검색 + 딥링크 생성 | 공식 REST API |
+| 쿠팡 웹 | 가격 이력 수집 (API 미제공 시) | reqwest + scraper |
+| 네이버 검색 API | 최저가(lprice) + 최고가(hprice) | 공식 REST API |
+
+### 6.2 차단 우회 전략 (비용 0)
+
+| 기법 | 설명 |
+|------|------|
+| **랜덤 딜레이** | 요청 간 3~10초 랜덤 sleep |
+| **UA 로테이션** | 10+ 브라우저 UA 풀에서 랜덤 선택 |
+| **요청 분산** | 카테고리별 시차 배치 (동시에 전체 수집하지 않음) |
+| **Referer 설정** | 자연스러운 Referer 헤더 |
+| **세션 유지** | Cookie jar로 세션 유지 (쿠팡 세션 필요 시) |
+| **Headless 대기** | reqwest 차단 시 headless-chrome 크레이트로 전환 |
+
+### 6.3 수집 스케줄
+
+| 작업 | 주기 | 대상 | 예상 시간 |
+|------|------|------|----------|
+| **가격 수집** | 6시간 | 전체 추적 상품 (~1,800개) | ~90분 (3초 간격) |
+| **인기 검색어 집계** | 1시간 | 검색 로그 집계 → popular_searches | <1초 |
+| **products 통계 갱신** | 가격 수집 직후 | current_price, trend, timing_score | <1분 |
+| **알림 평가** | 가격 수집 직후 | 활성 알림 조건 체크 → 푸시 발송 | <1분 |
+
+### 6.4 초기 상품 확보
+
+- **카테고리별 Top 100** = 18 카테고리 × 100 = **~1,800개** 상품
+- 쿠팡파트너스 API `searchItems`로 카테고리별 인기 상품 100개씩 수집
+- 첫 가격 수집 후 즉시 price_history에 기록 (기준점)
+- 이후 사용자가 URL/검색으로 추가하는 상품도 자동 추적 대상에 포함
+
+### 6.5 실패 처리
+
+| 상황 | 대응 |
+|------|------|
+| 개별 상품 요청 실패 | 3회 재시도 (exponential backoff: 5s → 15s → 45s). 실패 시 skip, 다음 주기에 재시도 |
+| IP 차단 감지 (403/429) | 즉시 해당 크롤링 세션 중단. 30분 대기 후 재시도 |
+| 전체 크롤러 장애 | Sentry 알림. 수동 확인 후 재시작 |
+| 쿠팡 HTML 구조 변경 | scraper selector 업데이트 필요. Sentry에서 파싱 에러 급증으로 감지 |
+
+---
+
+## 7. 마일스톤
+
+### 원칙
+- **MVP = P0 + P1 전부** (11개 기능, 무제한 무료)
+- 한 번에 하나만 → 완료 시 Git 커밋 → 다음
+- 3번 실패 → Git 롤백 → 범위 축소 재시도
 - 각 마일스톤 시작 전 STEP 3 (주석달기) 수행
 
 ---
 
-### M1. 기반 구축 (목표: 4주)
+### M1. 기반 구축 (4주)
 
-서버 프로젝트 생성 + DB 마이그레이션 + 핵심 CRUD API + 크롤링 파이프라인.
-플러터 프로젝트는 M2에서 시작.
+서버 + DB + 크롤링 + 인증 + 알림. Flutter는 M2에서 시작.
 
-#### M1-1. 프로젝트 스캐폴딩 + DB 마이그레이션
-- [ ] `server/` Rust 프로젝트 생성 (`cargo init`)
+#### 의존성 맵
+
+```
+M1-1 (스캐폴딩+DB) ──→ M1-3 (모델) ──┬→ M1-5 (상품 API) ──→ M1-6 (크롤링)
+                                       │                           ↓
+M1-2 (에러+공통) ─────→ M1-4 (인증) ──┘                     M1-8 (알림+푸시)
+                                                                  ↑
+                                       M1-7 (보안) ──────────────┘
+```
+
+#### M1-1. 스캐폴딩 + DB 마이그레이션 (~3일)
+- [ ] `server/` Rust 프로젝트 생성
 - [ ] Cargo.toml 의존성 추가
-- [ ] config.rs — DATABASE_URL, JWT_SECRET 등 환경변수
+- [ ] config.rs — 환경변수 (DATABASE_URL, JWT_SECRET, COUPANG_API_KEY 등)
 - [ ] db/mod.rs — PgPool 초기화
-- [ ] `migrations/001_initial_schema.sql` — 23개 테이블 + 인덱스 + 파티셔닝
-- [ ] `migrations/002_seed_data.sql` — shopping_malls (쿠팡, 네이버쇼핑), categories (18개)
-- [ ] SQLx 마이그레이션 실행 검증
+- [ ] `migrations/001_initial_schema.sql` — 21개 테이블 + 인덱스 + 파티셔닝 (subscriptions 제거)
+- [ ] `migrations/002_seed_data.sql` — shopping_malls (2), categories (18)
+- [ ] SQLx 마이그레이션 실행 + `sqlx prepare` 검증
 
-**파일:** `server/Cargo.toml`, `server/src/main.rs`, `server/src/config.rs`, `server/src/db/mod.rs`, `server/migrations/*`
+**DoD:** `cargo build` 성공 + `sqlx migrate run` 완료 + 21개 테이블 생성 확인
 
-#### M1-2. 에러 처리 + 공통 구조
-- [ ] error.rs — `AppError` 통합 에러 (thiserror + IntoResponse)
-- [ ] API 응답 포맷 통일: `{ "ok": bool, "data": T, "error": string? }`
-- [ ] tracing 로깅 설정 (stdout JSON)
+#### M1-2. 에러 처리 + 공통 (~2일)
+- [ ] error.rs — `AppError` (thiserror + IntoResponse). 에러 코드 체계: `AUTH_001`, `PRODUCT_001` 등
+- [ ] API 응답 포맷: `{ "ok": bool, "data": T, "error": { "code": string, "message": string }? }`
+- [ ] pagination.rs — Cursor 기반 페이지네이션: `{ "data": [], "cursor": "next_id", "has_more": bool }`
+- [ ] cache.rs — moka 캐시 초기화
+- [ ] tracing + sentry 초기화
 
-**파일:** `server/src/error.rs`, `server/src/main.rs`
+**DoD:** 에러 응답 + 페이지네이션 + 캐시가 동작하는 /health 엔드포인트
 
-#### M1-3. DB 모델 (SQLx FromRow)
-- [ ] user.rs — users, user_devices
+#### M1-3. DB 모델 (~3일)
+- [ ] user.rs — users (subscription_tier 제거), user_devices
 - [ ] product.rs — products, shopping_malls, categories
-- [ ] price_history.rs — price_history
+- [ ] price_history.rs
 - [ ] alert.rs — price_alerts, category_alerts, keyword_alerts
-- [ ] notification.rs — notifications
+- [ ] notification.rs
 - [ ] point.rs — user_points, point_transactions
 - [ ] reward.rs — referrals, daily_checkins
 - [ ] event.rs — events, event_participations
-- [ ] card_discount.rs — card_discounts
-- [ ] ai_prediction.rs — ai_predictions
-- [ ] popular_search.rs — popular_searches
+- [ ] card_discount.rs, ai_prediction.rs, popular_search.rs
 - [ ] security.rs — api_access_logs, blocked_ips
 
-**파일:** `server/src/db/models/*.rs`
+**DoD:** 모든 모델 `cargo build` 통과 + SQLx 컴파일타임 검증 성공
 
-#### M1-4. 인증 API
-- [ ] POST `/api/auth/kakao` — 카카오 소셜 로그인
-- [ ] POST `/api/auth/google` — 구글 소셜 로그인
-- [ ] POST `/api/auth/apple` — 애플 소셜 로그인
-- [ ] JWT 발급 + 갱신 로직
-- [ ] auth.rs 미들웨어 — Authorization 헤더 검증
-- [ ] 추천 코드 자동 생성 (가입 시)
+#### M1-4. 인증 API (~4일)
+- [ ] POST `/api/v1/auth/kakao` — 카카오 로그인
+- [ ] POST `/api/v1/auth/google` — 구글 로그인
+- [ ] POST `/api/v1/auth/apple` — 애플 로그인
+- [ ] JWT Access(30분) + Refresh(7일) 토큰 발급/갱신
+- [ ] auth.rs 미들웨어 — Authorization Bearer 검증
+- [ ] 추천 코드 자동 생성 (UUID 기반 8자리)
+- [ ] 단위 테스트: 토큰 발급/검증/만료
 
-**파일:** `server/src/api/routes/auth.rs`, `server/src/api/middleware/auth.rs`, `server/src/services/auth_service.rs`
+**DoD:** 소셜 로그인 → JWT 발급 → 인증 필요 API 호출 흐름 검증 (통합 테스트)
 
-#### M1-5. 상품 + 가격 API
-- [ ] GET `/api/products/:id` — 상품 상세 (현재가, 최저/최고/평균, 트렌드)
-- [ ] GET `/api/products/search?q=` — 키워드 검색
-- [ ] POST `/api/products/url` — URL로 상품 추가
-- [ ] GET `/api/products/:id/prices` — 가격 이력 (기간 필터)
-- [ ] GET `/api/products/:id/prices/daily` — 요일별 집계
+#### M1-5. 상품 + 가격 API (~4일)
+- [ ] GET `/api/v1/products/:id` — 상품 상세 (moka 캐시 5분)
+- [ ] GET `/api/v1/products/search?q=&cursor=&limit=` — 검색 (cursor 페이지네이션)
+- [ ] POST `/api/v1/products/url` — URL로 상품 추가
+- [ ] GET `/api/v1/products/:id/prices?from=&to=` — 가격 이력
+- [ ] GET `/api/v1/products/:id/prices/daily` — 요일별 집계
+- [ ] GET `/api/v1/products/popular` — 인기 검색어 (moka 캐시 10분)
 
-**파일:** `server/src/api/routes/products.rs`, `server/src/api/routes/prices.rs`, `server/src/services/product_service.rs`, `server/src/services/price_service.rs`
+**DoD:** 상품 CRUD + 가격 이력 API 작동 + 통합 테스트
 
-#### M1-6. 쿠팡 크롤링 파이프라인
-- [ ] coupang.rs — 쿠팡파트너스 API 연동 (상품 검색, 딥링크)
-- [ ] 가격 수집 로직 (reqwest + scraper)
-- [ ] scheduler.rs — 크론 스케줄 등록 (매 N시간 가격 수집)
-- [ ] 가격 변동 감지 → products 테이블 갱신 (current_price, price_trend 등)
+#### M1-6. 크롤링 파이프라인 (~5일)
+- [ ] coupang.rs — 쿠팡파트너스 API (searchItems, 딥링크)
+- [ ] 가격 수집: reqwest + scraper + UA 로테이션 + 랜덤 딜레이(3~10초)
+- [ ] scheduler.rs — 6시간 크론 (0 */6 * * *)
+- [ ] 초기 상품 확보: 카테고리별 Top 100 (~1,800개)
+- [ ] 가격 변동 감지 → products 갱신 (current_price, price_trend, days_since_lowest 등)
 - [ ] price_history INSERT
+- [ ] 실패 처리: 3회 재시도 + exponential backoff
 
-**파일:** `server/src/crawlers/coupang.rs`, `server/src/crawlers/scheduler.rs`
+**DoD:** 크론 1회 실행 → 1,800개 상품 가격 수집 완료 + price_history 기록 확인
 
-#### M1-7. 보안 미들웨어
+#### M1-7. 보안 미들웨어 (~2일)
 - [ ] rate_limit.rs — tower-governor (IP별 60req/min, 검색 10req/min)
-- [ ] bot_guard.rs — blocked_ips 테이블 조회 (인메모리 캐시 병행)
-- [ ] api_access_logs INSERT 미들웨어
+- [ ] bot_guard.rs — blocked_ips 조회 (moka 캐시 5분) + UA 블랙리스트
+- [ ] api_access_logs INSERT (비동기, 요청 흐름 미차단)
+- [ ] Rate limit 응답 헤더: `X-RateLimit-Remaining`, `Retry-After`
 
-**파일:** `server/src/api/middleware/rate_limit.rs`, `server/src/api/middleware/bot_guard.rs`
+**DoD:** 429 응답 정상 반환 + blocked IP 요청 거부 확인
 
-#### M1-8. 기본 알림 + 푸시
-- [ ] CRUD `/api/alerts/price` — 가격 알림 설정
-- [ ] alert_service.rs — 가격 변동 시 활성 알림 평가
-- [ ] notification_service.rs — 알림 생성 + 푸시 발송 트리거
-- [ ] push/apns.rs — iOS 푸시 (a2)
-- [ ] push/fcm.rs — Android 푸시 (fcm)
+#### M1-8. 알림 + 푸시 (~5일)
+- [ ] CRUD `/api/v1/alerts/price`
+- [ ] CRUD `/api/v1/alerts/category`
+- [ ] CRUD `/api/v1/alerts/keyword`
+- [ ] alert_service.rs — 가격 변동 시 활성 알림 조건 평가
+- [ ] notification_service.rs — 알림 생성 + 푸시 발송
+- [ ] push/apns.rs — a2 (P8 키)
+- [ ] push/fcm.rs — fcm HTTP v1
+- [ ] 단위 테스트: 알림 조건 평가 로직
 
-**파일:** `server/src/api/routes/alerts.rs`, `server/src/services/alert_service.rs`, `server/src/services/notification_service.rs`, `server/src/push/*.rs`
+**DoD:** 가격 변동 → 알림 조건 매칭 → 푸시 발송 → notifications 테이블 기록 (E2E)
 
 ---
 
-### M2. MVP 앱 개발 (목표: 8주)
+### M2. MVP 앱 개발 — P0+P1 (10주)
 
-Flutter 프로젝트 생성 + P0 핵심 화면 + 서버 API 연동.
+Flutter 앱 + P0(3개) + P1(8개) = **11개 기능 모두 구현**.
+구독 화면 없음. 모든 기능 무료/무제한.
 
-#### M2-1. Flutter 프로젝트 + 공통 구조
-- [ ] `app/` Flutter 프로젝트 생성
-- [ ] pubspec.yaml 의존성 추가
-- [ ] GoRouter 라우팅 (22 화면 경로 정의)
+#### M2-1. Flutter 스캐폴딩 (~3일)
+- [ ] GoRouter 21개 화면 경로
 - [ ] Riverpod 프로바이더 구조
-- [ ] dio API 클라이언트 (JWT 인터셉터)
-- [ ] 테마 설정 (라이트/다크)
-- [ ] freezed 모델 코드 생성 설정
+- [ ] dio + JWT 인터셉터 + Cursor 페이지네이션 헬퍼
+- [ ] freezed 모델 + build_runner
+- [ ] 테마 (라이트/다크)
+- [ ] Sentry Flutter 초기화
 
-#### M2-2. 인증 화면
-- [ ] AUTH_LOGIN — 소셜 로그인 (카카오/구글/애플 버튼)
-- [ ] AUTH_SIGNUP — 회원가입 (추천 코드 입력 포함)
-- [ ] ONBOARDING — 최초 실행 소개 슬라이드
+#### M2-2. 인증 + 온보딩 (~3일)
+- [ ] AUTH_LOGIN, AUTH_SIGNUP, ONBOARDING
 
-#### M2-3. 홈 화면
-- [ ] HOME — 인기검색어 스크롤, 상품 카드 그리드, 필터/정렬
-- [ ] product_card.dart — 공용 상품 카드 (이미지, 가격, 트렌드 아이콘, 배지)
-- [ ] filter_bar.dart — 4종 필터 (품절임박/역대최저/하락추세/만원이하)
-- [ ] sort_selector.dart — 4종 정렬
+#### M2-3. 홈 (~5일)
+- [ ] HOME — 인기검색어 스크롤 + 상품 카드 그리드 + 필터/정렬
+- [ ] product_card.dart, filter_bar.dart, sort_selector.dart
 
-#### M2-4. 검색
-- [ ] SEARCH — 키워드/URL 입력, 인기검색어, 최근검색
-- [ ] SEARCH_RESULT — 결과 리스트 + 필터/정렬 + 무한 스크롤
+#### M2-4. 검색 (~3일)
+- [ ] SEARCH + SEARCH_RESULT (무한 스크롤, cursor)
 
-#### M2-5. 상품 상세
-- [ ] PRODUCT_DETAIL — 가격 그래프 (fl_chart), 상품 정보, 알림 설정 CTA
-- [ ] price_chart.dart — fl_chart 래퍼 (줌/스크롤, 기간 선택)
-- [ ] 하단 CTA — "N원 싸게 구매하기" 쿠팡파트너스 딥링크
+#### M2-5. 상품 상세 (~7일)
+- [ ] PRODUCT_DETAIL — 가격 그래프(fl_chart) + 가격하락확률 게이지 + 요일별 차트
+- [ ] 카드 할인가 섹션
+- [ ] 단가 계산 표시
+- [ ] 하단 CTA ("N원 싸게 구매하기")
 
-#### M2-6. 알림 + 즐겨찾기
-- [ ] ALERT_CENTER — 5탭 (가격/카테고리/키워드/보상/이벤트)
-- [ ] ALERT_SETTING — 4단계 프리셋 (지정가/평균이하/최저근접/역대최저)
-- [ ] FAVORITES — 즐겨찾기 목록 + 7일 추이 미니차트
+#### M2-6. 알림 체계 (~7일)
+- [ ] ALERT_CENTER (5탭)
+- [ ] ALERT_SETTING (4단계 프리셋 + % 기반)
+- [ ] CATEGORY_ALERT — 패시브 알림 등록/관리
+- [ ] KEYWORD_ALERT — 키워드 핫딜
 
-#### M2-7. 마이페이지 + 설정
-- [ ] MY_PAGE — 프로필, 구독 상태, 포인트 위젯, 메뉴 그룹
-- [ ] SETTINGS — 알림 ON/OFF, 테마, 언어
-- [ ] SUBSCRIPTION — 프리미엄 플랜 비교 + 구독 버튼
+#### M2-7. 즐겨찾기 (~2일)
+- [ ] FAVORITES + 7일 미니차트
 
-#### M2-8. 웹 대응
-- [ ] WEB_LANDING — 비로그인 랜딩 (서비스 소개 + 앱 다운로드)
-- [ ] 웹 GNB 레이아웃 (상단 메뉴)
-- [ ] 카테고리 좌측 사이드바 (웹 전용)
-- [ ] 반응형 그리드 (2열 앱 / 3~4열 웹)
+#### M2-8. 마이페이지 + 설정 (~3일)
+- [ ] MY_PAGE (프로필, 포인트 위젯, 메뉴)
+- [ ] SETTINGS (알림 ON/OFF, 테마)
+
+#### M2-9. 웹 대응 (~5일)
+- [ ] WEB_LANDING
+- [ ] 웹 GNB + 카테고리 사이드바
+- [ ] 반응형 그리드 (2열/3~4열)
+
+#### M2-10. 테스트 (~5일)
+- [ ] Widget 테스트 (핵심 화면)
+- [ ] Provider 단위 테스트
+- [ ] API 연동 통합 테스트
+
+**M2 DoD:** P0+P1 전 기능 동작 + Android/iOS/Web 빌드 성공 + 핵심 플로우 테스트 통과
 
 ---
 
-### M3. 베타 출시 (목표: 2주)
+### M3. 베타 출시 (2주)
 
+- [ ] CI/CD 구성 (GitHub Actions: build + test + lint)
 - [ ] 전체 기능 QA
-- [ ] 성능 프로파일링 (API 응답시간 <200ms)
-- [ ] 쿠팡파트너스 연동 검증 (딥링크, 클릭 트래킹)
-- [ ] 클로즈드 베타 배포 (TestFlight + Google Play 내부 테스트)
-- [ ] 사용자 피드백 수집 + 크리티컬 버그 수정
+- [ ] 성능: API <200ms, 앱 콜드스타트 <3초
+- [ ] 쿠팡파트너스 딥링크 + 클릭 트래킹 검증
+- [ ] pg_dump 일일 백업 크론 설정
+- [ ] TestFlight + Google Play 내부 테스트 배포
+- [ ] 피드백 수집 + 크리티컬 버그 수정
+
+**M3 DoD:** 10명+ 베타 테스터 피드백 수집 + 크리티컬 버그 0건
 
 ---
 
-### M4. 정식 출시 + P1 (목표: 4주)
+### M4. 정식 출시 (2주)
 
-#### M4-1. P1 기능 추가
-- [ ] CATEGORY_ALERT — 카테고리 패시브 알림 등록/관리
-- [ ] KEYWORD_ALERT — 키워드 핫딜 추적
-- [ ] % 기반 글로벌 알림 설정
-- [ ] 가격하락확률 게이지 (5단계 시각화)
-- [ ] 요일별 가격 차트
-- [ ] 단가 계산 (1정당, 100ml당)
-- [ ] 카드 할인가 비교
-
-#### M4-2. 스토어 출시
 - [ ] App Store 심사 제출
 - [ ] Google Play 출시
-- [ ] 웹 정식 배포
+- [ ] 웹 정식 배포 (도메인 + HTTPS)
+- [ ] 쿠팡파트너스 커미션 정산 확인
+- [ ] SHARE_PREVIEW — 카카오톡/SNS 공유
+
+**M4 DoD:** 양대 스토어 출시 완료 + 웹 접속 가능 + 첫 커미션 발생
 
 ---
 
-### M5. 차별화 확장 — P2 (목표: 8주)
+### M5. 차별화 확장 — P2 (8주)
 
-#### M5-1. AI + 보상
-- [ ] AI 가격 예측 (Hopper 모델) — 프리미엄 전용
+- [ ] AI 가격 예측 ("지금 사세요/기다리세요") — 무료 제공
 - [ ] 포인트/보상 시스템 (적립/사용)
 - [ ] 출석체크 + 연속 보너스
-- [ ] 친구 초대 (추천 코드)
+- [ ] 친구 초대 (추천 코드 보상)
 - [ ] 이벤트/퀴즈
-
-#### M5-2. 확장 기능
-- [ ] 다중 쇼핑몰 비교 (네이버 검색 API lprice)
+- [ ] 다중 쇼핑몰 비교 (네이버 API)
 - [ ] 판매 속도 급증 선제 알림
 - [ ] N일만에 최저가 배지
 - [ ] 카카오톡 알림 채널
@@ -393,144 +494,120 @@ Flutter 프로젝트 생성 + P0 핵심 화면 + 서버 API 연동.
 
 ---
 
-## 4. 트레이드오프 기록
+## 8. 트레이드오프 기록
 
-### 4.1 상태관리: Riverpod vs BLoC
-- **선택: Riverpod**
-- 근거: BLoC는 보일러플레이트 과다. Riverpod은 코드 생성 + 자동 캐싱 + 간결한 API. 1인 개발에 적합.
-- 리스크: BLoC 대비 커뮤니티 규모는 작지만, Flutter 공식 추천 수준.
-
-### 4.2 라우팅: GoRouter vs auto_route
-- **선택: GoRouter**
-- 근거: Flutter 팀 공식 패키지. 웹 딥링크 네이티브 지원. 코드 생성 없이 선언적 라우팅.
-
-### 4.3 HTTP: dio vs http
-- **선택: dio**
-- 근거: 인터셉터 (JWT 자동 첨부, 토큰 갱신), 요청 취소, FormData 지원. http는 인터셉터 없음.
-
-### 4.4 인증: JWT 자체 발급 vs OAuth2 서비스
-- **선택: JWT 자체 발급**
-- 근거: 소셜 로그인으로 사용자 확인 → 자체 JWT 발급. Firebase Auth 의존성 제거. Access + Refresh 토큰 패턴.
-- 리스크: 토큰 관리 직접 구현 필요하나, 표준 패턴이므로 복잡도 낮음.
-
-### 4.5 크롤링: 서버 내장 vs 별도 워커
-- **선택: 서버 내장 (tokio-cron-scheduler)**
-- 근거: MVP에서 별도 프로세스 운영은 과잉. Tokio 태스크로 백그라운드 실행. 규모 커지면 분리 가능.
-- 리스크: 크롤링 부하가 API 응답에 영향 줄 수 있음 → Tokio 태스크 우선순위 조절 또는 셈머포어로 동시성 제한.
-
-### 4.6 푸시: 자체 vs Firebase Cloud Messaging 전용
-- **선택: 자체 시스템 (a2 + fcm 크레이트)**
-- 근거: FCM 단독은 iOS에서 APNs 경유 필수. 직접 APNs/FCM 양쪽 관리하면 Firebase 의존성 제거 + 세밀한 제어.
-- 리스크: APNs 인증서/키 관리 필요. P8 인증 키 사용으로 단순화.
-
-### 4.7 가격 차트: fl_chart vs syncfusion
-- **선택: fl_chart**
-- 근거: MIT 라이선스 (무료). 줌/스크롤 지원. Syncfusion은 5개발자 이상 유료.
-- 리스크: 커스터마이징 한계 시 직접 CustomPainter 구현 가능.
+| # | 주제 | 선택 | 근거 | 리스크 |
+|---|------|------|------|--------|
+| 1 | 상태관리 | **Riverpod** | BLoC 보일러플레이트 과다. 1인 개발에 적합 | 커뮤니티 규모 |
+| 2 | 라우팅 | **GoRouter** | Flutter 공식. 웹 딥링크 네이티브 지원 | - |
+| 3 | HTTP (Flutter) | **dio** | 인터셉터(JWT), 요청 취소 지원 | - |
+| 4 | 인증 | **JWT 자체 발급** | Firebase Auth 의존성 제거. Access+Refresh 패턴 | 직접 구현 |
+| 5 | 크롤링 | **서버 내장** | 별도 프로세스 과잉. Semaphore로 동시성 제한 | API 영향 가능 |
+| 6 | 푸시 | **자체 (a2+fcm)** | Firebase 의존성 제거. 세밀한 제어 | APNs 키 관리 |
+| 7 | 차트 | **fl_chart** | MIT 무료. 줌/스크롤 지원 | 커스터마이징 한계 |
+| 8 | 캐싱 | **moka (인메모리)** | Redis 사용 안 함. 단일 서버에 적합 | 서버 재시작 시 소실 |
+| 9 | 수익 | **커미션+광고** | 구독 없음. 무료 개방으로 사용자 극대화 | 커미션 의존도 높음 |
 
 ---
 
-## 5. API 엔드포인트 설계 (M1~M2 범위)
+## 9. API 설계 규칙
 
-### 인증
-```
-POST   /api/auth/kakao          # 카카오 로그인
-POST   /api/auth/google         # 구글 로그인
-POST   /api/auth/apple          # 애플 로그인
-POST   /api/auth/refresh        # 토큰 갱신
-DELETE /api/auth/logout         # 로그아웃 (디바이스 토큰 제거)
-```
+### 공통 규칙
+- **프리픽스:** `/api/v1/`
+- **인증:** `Authorization: Bearer <JWT>`
+- **페이지네이션:** Cursor 기반 `?cursor=<id>&limit=20`
+- **응답 포맷:**
 
-### 상품
-```
-GET    /api/products/:id                 # 상품 상세
-GET    /api/products/search?q=&cat=&sort=&filter=  # 검색
-POST   /api/products/url                 # URL로 상품 등록
-GET    /api/products/:id/prices?from=&to=  # 가격 이력
-GET    /api/products/:id/prices/daily    # 요일별 가격 집계
-GET    /api/products/popular             # 인기 검색어
+```json
+// 성공
+{ "ok": true, "data": { ... } }
+
+// 목록 (cursor)
+{ "ok": true, "data": [...], "cursor": "next_id_or_null", "has_more": true }
+
+// 에러
+{ "ok": false, "error": { "code": "AUTH_001", "message": "토큰이 만료되었습니다" } }
 ```
 
-### 알림
-```
-GET    /api/alerts/price                 # 내 가격 알림 목록
-POST   /api/alerts/price                 # 가격 알림 생성
-PUT    /api/alerts/price/:id             # 수정
-DELETE /api/alerts/price/:id             # 삭제
-GET    /api/alerts/category              # 내 카테고리 알림 목록
-POST   /api/alerts/category              # 카테고리 알림 생성
-PUT    /api/alerts/category/:id          # 수정
-DELETE /api/alerts/category/:id          # 삭제
-GET    /api/alerts/keyword               # 키워드 알림 목록
-POST   /api/alerts/keyword               # 키워드 알림 생성
-DELETE /api/alerts/keyword/:id           # 삭제
-```
+### 에러 코드 체계
 
-### 즐겨찾기
-```
-GET    /api/favorites                    # 목록 (정렬: 추가순/가격/할인률)
-POST   /api/favorites                    # 추가
-DELETE /api/favorites/:product_id        # 삭제
-```
+| 프리픽스 | 범위 | 예시 |
+|---------|------|------|
+| AUTH_ | 인증/인가 | AUTH_001 토큰 만료, AUTH_002 권한 없음 |
+| PRODUCT_ | 상품 | PRODUCT_001 상품 없음, PRODUCT_002 잘못된 URL |
+| ALERT_ | 알림 | ALERT_001 알림 없음, ALERT_002 조건 오류 |
+| RATE_ | 제한 | RATE_001 요청 초과 |
+| SYS_ | 시스템 | SYS_001 내부 오류, SYS_002 DB 오류 |
 
-### 알림 이력
-```
-GET    /api/notifications?tab=           # 알림 목록 (탭 필터)
-PUT    /api/notifications/:id/read       # 읽음 처리
-PUT    /api/notifications/read-all       # 전체 읽음
-```
+### Rate Limit 응답 헤더
 
-### 사용자
 ```
-GET    /api/me                           # 내 정보
-PUT    /api/me                           # 프로필 수정
-POST   /api/me/devices                   # 디바이스 토큰 등록
-DELETE /api/me                           # 회원 탈퇴 (soft delete)
-```
-
-### 포인트/보상
-```
-GET    /api/points                       # 잔액 + 요약
-GET    /api/points/transactions?type=    # 거래 이력
-POST   /api/checkin                      # 출석체크
-GET    /api/referrals                    # 추천 현황
-POST   /api/referrals/validate           # 추천 코드 확인
-```
-
-### 이벤트
-```
-GET    /api/events                       # 진행 중 이벤트
-GET    /api/events/:id                   # 이벤트 상세
-POST   /api/events/:id/participate       # 참여 (퀴즈 답변 등)
-```
-
-### 시스템
-```
-GET    /health                           # 헬스체크
-GET    /api/categories                   # 카테고리 목록
+X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 45
+X-RateLimit-Reset: 1709312400
+Retry-After: 30  (429 응답 시)
 ```
 
 ---
 
-## 6. 실행 순서 요약
+## 10. 테스트 전략
 
-```
-현재 위치: STEP 2 (plan.md 초안 작성) ← 여기
-    │
-    ▼
-STEP 2 반복: 인간 리뷰 → 인라인 메모 → AI 업데이트 (만족할 때까지)
-    │
-    ▼
-STEP 3: M1-1 주석달기 ("migrations/001 에 주석으로 SQL 구조만 작성. 코드 쓰지 마")
-    │
-    ▼
-STEP 4: M1-1 구현 → Git 커밋 → M1-2 주석 → 구현 → ... → M1 완료
-    │
-    ▼
-M2 주석 → 구현 → ... → M5 까지 반복
+| 레이어 | 범위 | 도구 | 목표 커버리지 |
+|--------|------|------|-------------|
+| **Rust 단위** | services, 알림 평가, 캐시 | `#[cfg(test)]` | 70%+ |
+| **Rust 통합** | API 엔드포인트 (실제 테스트 DB) | `#[tokio::test]` | 핵심 API 100% |
+| **Flutter Widget** | 핵심 화면 렌더링 | `flutter_test` | 주요 화면 |
+| **Flutter Provider** | 상태 변경 로직 | `riverpod test` | 60%+ |
+| **E2E** | 수동 QA (M3) | 체크리스트 기반 | 전 기능 |
+
+### 테스트 DB
+- `pullcents_test` 별도 DB 사용
+- 각 통합 테스트는 트랜잭션 내 실행 → 롤백 (테스트 간 격리)
+
+---
+
+## 11. 배포/운영
+
+| 항목 | 설정 |
+|------|------|
+| **서버** | 로컬 머신 (집/사무실) |
+| **프로세스** | systemd 서비스 (auto-restart) |
+| **DB 백업** | pg_dump 일일 크론 → `backups/` 디렉토리. 7일 보관 후 순환 |
+| **모니터링** | Sentry (에러 트래킹) + /health 엔드포인트 |
+| **로그** | tracing → stdout JSON → journald |
+| **HTTPS** | Cloudflare (무료 SSL) 또는 Let's Encrypt |
+| **CI/CD** | GitHub Actions (M3 전에 구성). cargo test + flutter test + build |
+
+### pg_dump 백업 크론
+
+```bash
+# /etc/cron.d/pullcents-backup
+0 3 * * * postgres pg_dump pullcents | gzip > /home/user/backups/pullcents_$(date +\%Y\%m\%d).sql.gz
+# 7일 이전 삭제
+0 4 * * * find /home/user/backups/ -name "*.sql.gz" -mtime +7 -delete
 ```
 
 ---
 
-> **다음 행동**: 이 plan.md를 리뷰하고, 인라인 메모로 피드백을 주세요.
-> "메모 반영해서 업데이트해. 아직 구현하지 마."
+## 12. 실행 순서
+
+```
+현재 위치: STEP 2 (plan.md 리뷰 중) ← 여기
+    │
+    ├─ (병렬) M0 사전 준비: 쿠팡파트너스 신청, 소셜 로그인 앱 등록, Apple 가입
+    │
+    ▼
+STEP 3: M1-1 주석달기 → 리뷰 → 반복
+    │
+    ▼
+STEP 4: M1-1 구현 → 커밋 → M1-2 → ... → M1-8 → M1 완료
+    │
+    ▼
+M2 주석 → 구현 → M3 → M4 → M5
+```
+
+---
+
+> **다음 행동:** plan.md v0.2 리뷰 후 피드백을 주세요.
+> 승인되면 M0 사전 준비 시작 + STEP 3 (M1-1 주석달기) 진입.
+> **아직 구현하지 마.**

@@ -1,6 +1,6 @@
 # PullCents DB 스키마 설계
 
-> **상태: DRAFT v0.3**
+> **상태: DRAFT v0.4**
 > 작성일: 2026-03-01 | 갱신: 2026-03-01
 > DB: PostgreSQL 17.9 (localhost:5432) | ORM: SQLx (Rust, 컴파일타임 검증)
 > MVP 대상: 쿠팡 + 네이버쇼핑
@@ -17,10 +17,10 @@
 | **알림** | price_alerts, category_alerts, keyword_alerts, notifications | 4종 알림 체계 |
 | **AI** | ai_predictions | AI 가격 예측 결과 |
 | **카드 할인** | card_discounts | 카드사별 할인가 |
-| **보상** | user_points, point_transactions, referrals, daily_checkins | 포인트 + 추천 + 출석 |
+| **보상** | user_points, point_transactions, referrals, daily_checkins, roulette_results | 센트(¢) + 추천 + 출석 + 룰렛 |
 | **이벤트** | events, event_participations | 이벤트/퀴즈 |
 | **보안** | api_access_logs, blocked_ips | 접근 로그 + IP 차단 ★ 신규 |
-| **기타** | user_favorites, subscriptions, popular_searches | 즐겨찾기 + 구독 + 인기 검색어 |
+| **기타** | user_favorites, popular_searches | 즐겨찾기 + 인기 검색어 |
 
 ---
 
@@ -29,7 +29,6 @@
 ```mermaid
 erDiagram
     users ||--o{ user_devices : "1:N"
-    users ||--o{ subscriptions : "1:N"
     users ||--o{ price_alerts : "1:N"
     users ||--o{ category_alerts : "1:N"
     users ||--o{ keyword_alerts : "1:N"
@@ -40,6 +39,7 @@ erDiagram
     users ||--o{ referrals : "referrer 1:N"
     users ||--o{ daily_checkins : "1:N"
     users ||--o{ event_participations : "1:N"
+    users ||--o{ roulette_results : "1:N"
 
     products ||--o{ price_history : "1:N"
     products ||--o{ price_alerts : "1:N"
@@ -67,7 +67,6 @@ erDiagram
 | auth_provider | TEXT | NOT NULL | kakao, google, apple, naver |
 | auth_provider_id | TEXT | NOT NULL | 소셜 고유 ID |
 | profile_image_url | TEXT | | |
-| subscription_tier | TEXT | NOT NULL, DEFAULT 'free' | free, premium (비정규화) |
 | point_balance | INTEGER | NOT NULL, DEFAULT 0 | 현재 포인트 잔액 (비정규화) |
 | referral_code | TEXT | UNIQUE, NOT NULL | 내 추천 코드 (가입 시 자동 생성) |
 | referred_by | BIGINT | FK -> users(id) | 나를 추천한 사용자 |
@@ -161,7 +160,7 @@ erDiagram
 - Hopper 모델 참고: "지금 사세요 / 기다리세요" 판단 결과 저장
 - `factors` JSONB — 예측에 사용된 근거를 유연하게 저장 (계절성 점수, 프로모션 주기, 가격 이력 패턴 등)
 - `expires_at` — 예측은 시간이 지나면 무효. 최신 예측만 활성 사용
-- 프리미엄 기능으로 제공
+- 모든 사용자에게 무료 제공
 
 ### 2-6. card_discounts (카드 할인가) ★ 신규
 
@@ -243,7 +242,7 @@ v0.1과 동일. keyword + category_id(선택) + max_price(선택)
 - `price_alert_id` + `keyword_alert_id` → `reference_id` + `reference_type` 통합 (다형성 참조)
 - `notification_type`에 referral, event 추가
 
-### 2-11. user_points (사용자 포인트 잔액) ★ 신규
+### 2-11. user_points (사용자 센트 잔액) ★ 신규
 
 | 컬럼 | 타입 | 제약조건 | 설명 |
 |---|---|---|---|
@@ -255,9 +254,9 @@ v0.1과 동일. keyword + category_id(선택) + max_price(선택)
 | updated_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | |
 
 **설계 근거:**
-- 폴센트 "열쇠" 보상 시스템 참고 — 돈처럼 활용되는 앱 내 화폐
+- PullCents "센트(¢)" 보상 화폐 — 기프티콘 교환 가능한 실질 가치
 - `balance`는 `users.point_balance`와 동기화 (이중 캐시로 빠른 조회)
-- 포인트 획득/사용은 모두 point_transactions에 기록
+- 센트 획득/사용은 모두 point_transactions에 기록
 
 ### 2-12. point_transactions (포인트 거래 이력) ★ 신규
 
@@ -276,13 +275,13 @@ v0.1과 동일. keyword + category_id(선택) + max_price(선택)
 
 | 값 | amount | 설명 |
 |---|---|---|
-| `daily_checkin` | +N | 출석체크 보상 |
-| `referral_reward` | +N | 추천 보상 (추천인/피추천인 모두) |
-| `event_reward` | +N | 이벤트/퀴즈 참여 보상 |
+| `roulette_checkin` | +N | 출석 10일 룰렛 당첨 보상 |
+| `roulette_event` | +N | 이벤트/퀴즈 룰렛 당첨 보상 |
+| `referral_reward` | +N | 추천 보상 (추천인 3¢ 확정) |
+| `referral_welcome` | +N | 피추천인 웰컴 보상 (1¢) |
 | `signup_bonus` | +N | 가입 보너스 |
-| `subscription_purchase` | -N | 구독 구매에 포인트 사용 |
-| `ad_removal` | -N | 광고 제거에 포인트 사용 |
-| `premium_feature` | -N | 프리미엄 기능 이용에 사용 |
+| `gifticon_exchange` | -N | 기프티콘 교환에 사용 |
+| `ad_removal` | -N | 광고 제거에 사용 |
 | `admin_adjustment` | ±N | 운영자 수동 조정 |
 
 ### 2-13. referrals (추천 보상 추적) ★ 신규
@@ -309,14 +308,15 @@ v0.1과 동일. keyword + category_id(선택) + max_price(선택)
 | user_id | BIGINT | FK -> users(id), NOT NULL | |
 | checkin_date | DATE | NOT NULL | 출석 날짜 |
 | streak_count | INTEGER | NOT NULL, DEFAULT 1 | 연속 출석 일수 |
-| points_earned | INTEGER | NOT NULL | 획득 포인트 |
+| roulette_earned | BOOLEAN | NOT NULL, DEFAULT FALSE | 10일 달성으로 룰렛 기회 획득 여부 |
 | created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | |
 
 **UNIQUE 제약:** `(user_id, checkin_date)` — 하루 1회만
 
 **설계 근거:**
-- `streak_count` — 연속 출석 보너스 (7일 연속 시 추가 포인트 등)
+- `streak_count` — 10일 연속 출석 시 룰렛 기회 획득
 - 연속 출석 끊기면 streak_count 리셋
+- 월 최대 3회 룰렛 기회 (10일×3 = 30일)
 
 ### 2-15. events (이벤트/퀴즈) ★ 신규
 
@@ -348,7 +348,24 @@ v0.1과 동일. keyword + category_id(선택) + max_price(선택)
 
 **UNIQUE 제약:** `(event_id, user_id)` — 이벤트당 1회 참여
 
-### 2-17. popular_searches (인기 검색어) ★ 신규
+### 2-17. roulette_results (룰렛 결과) ★ 신규
+
+| 컬럼 | 타입 | 제약조건 | 설명 |
+|---|---|---|---|
+| id | BIGINT | PK, GENERATED ALWAYS AS IDENTITY | |
+| user_id | BIGINT | FK -> users(id), NOT NULL | |
+| roulette_type | TEXT | NOT NULL | checkin, event, quiz |
+| reference_id | BIGINT | | 관련 엔티티 ID (daily_checkin_id 또는 event_participation_id) |
+| is_winner | BOOLEAN | NOT NULL | 당첨 여부 |
+| reward_amount | INTEGER | NOT NULL, DEFAULT 0 | 당첨 센트(¢) (0=미당첨, 1~2=당첨) |
+| created_at | TIMESTAMPTZ | NOT NULL, DEFAULT NOW() | |
+
+**설계 근거:**
+- 출석체크/이벤트/퀴즈 모두 확률형 룰렛으로 보상 → 통합 기록 테이블
+- `roulette_type`으로 출석 룰렛/이벤트 룰렛 구분
+- 당첨 시 자동으로 point_transactions에 적립 기록 생성
+
+### 2-18. popular_searches (인기 검색어) ★ 신규
 
 | 컬럼 | 타입 | 제약조건 | 설명 |
 |---|---|---|---|
@@ -365,7 +382,7 @@ v0.1과 동일. keyword + category_id(선택) + max_price(선택)
 - 실시간 검색 로그에서 주기적으로 집계하여 이 테이블 갱신
 - `trend` — 순위 변동 방향 (↑↓ 화살표 표시용)
 
-### 2-18. api_access_logs (API 접근 로그) ★ 신규
+### 2-19. api_access_logs (API 접근 로그) ★ 신규
 
 | 컬럼 | 타입 | 제약조건 | 설명 |
 |---|---|---|---|
@@ -385,7 +402,7 @@ v0.1과 동일. keyword + category_id(선택) + max_price(선택)
 - 주기적 집계 → blocked_ips 테이블로 차단 IP 등록
 - **보관 정책**: 30일 보관 후 삭제 (용량 관리) — 집계 데이터만 장기 보관
 
-### 2-19. blocked_ips (IP 차단 목록) ★ 신규
+### 2-20. blocked_ips (IP 차단 목록) ★ 신규
 
 | 컬럼 | 타입 | 제약조건 | 설명 |
 |---|---|---|---|
@@ -403,9 +420,8 @@ v0.1과 동일. keyword + category_id(선택) + max_price(선택)
 - `blocked_until`이 NULL이면 영구 차단, 과거 시점이면 자동 해제
 - Fail2Ban이 감지 → 이 테이블에 INSERT → Axum이 요청 거부
 
-### 2-20. 나머지 테이블 (v0.1과 동일)
+### 2-21. 나머지 테이블 (v0.1과 동일)
 
-- **subscriptions** — 유료 구독 (v0.1 그대로)
 - **categories** — 카테고리 계층 구조 (v0.1 그대로)
 - **user_favorites** — 즐겨찾기 (v0.1 그대로)
 - **shopping_malls** — 쇼핑몰 (v0.1 그대로, 초기값: 쿠팡 + 네이버쇼핑)
@@ -440,6 +456,7 @@ v0.1과 동일. keyword + category_id(선택) + max_price(선택)
 | idx_daily_checkins_user | daily_checkins | (user_id, checkin_date DESC) | 사용자 출석 이력 + 연속 체크 |
 | idx_point_transactions_user | point_transactions | (user_id, created_at DESC) | 사용자 포인트 이력 |
 | idx_referrals_referrer | referrals | (referrer_id) | 추천인의 추천 현황 조회 |
+| idx_roulette_user_type | roulette_results | (user_id, roulette_type, created_at DESC) | 사용자별 룰렛 이력 + 월별 횟수 집계 |
 | idx_popular_searches_rank | popular_searches | (rank) | 순위순 인기 검색어 조회 |
 | idx_access_logs_ip_time | api_access_logs | (ip_address, created_at DESC) | IP별 최근 요청 조회 (패턴 분석) |
 | idx_access_logs_status_time | api_access_logs | (status_code, created_at DESC) WHERE status_code = 429 | 429 응답 빈도 집계 (Fail2Ban) |
@@ -488,7 +505,6 @@ v0.1과 동일. keyword + category_id(선택) + max_price(선택)
 | **point_transactions** | **무기한** | 포인트 감사 추적 |
 | **notifications** | **무기한** | 사용자 이력 |
 | **ai_predictions** | **무기한** | 예측 정확도 검증용 |
-| **subscriptions** | 무기한 | 결제 법적 의무 |
 | **users (deleted)** | 탈퇴 후 1년 | 개인정보보호법 |
 | **api_access_logs** | **30일** | 용량 관리 (집계 결과만 장기 보관) |
 | **blocked_ips** | **무기한** | 영구 차단 IP 이력 유지 |
@@ -503,10 +519,10 @@ v0.1과 동일. keyword + category_id(선택) + max_price(선택)
 | **AI 가격 예측** | ai_predictions | buy_now/wait/neutral 판단 + 신뢰도 |
 | **카드 할인가** | card_discounts | 카드사별 할인 적용 가격 |
 | **카테고리 패시브 알림** | category_alerts | 카테고리 등록 → 자동 모니터링 |
-| **추천 보상** | referrals + point_transactions | 추천 가입 시 쌍방 보상 |
-| **포인트 시스템** | user_points + point_transactions | 앱 내 화폐 (폴센트 "열쇠" 참고) |
-| **출석체크** | daily_checkins + point_transactions | 매일 보상 + 연속 출석 보너스 |
-| **이벤트/퀴즈** | events + event_participations | 참여 보상 포인트 |
+| **추천 보상** | referrals + point_transactions | 추천 가입 시 초대자 3¢ 확정 지급 |
+| **센트(¢) 시스템** | user_points + point_transactions | 앱 내 보상 화폐 → 기프티콘 교환 |
+| **출석체크 룰렛** | daily_checkins + roulette_results | 10일 연속 → 룰렛 기회, 월 최대 3회 |
+| **이벤트/퀴즈 룰렛** | events + event_participations + roulette_results | 참여 → 확률형 룰렛 보상 |
 | **인기 검색어** | popular_searches | 스크롤링 표시, 주기적 집계 |
 | **판매 속도 알림** | products.sales_velocity + category_alerts | 급증 감지 선제 알림 |
 | **무기한 보관** | 전 테이블 | 삭제 없이 전체 보관 (api_access_logs 제외 30일) |
