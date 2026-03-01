@@ -1,8 +1,8 @@
 # PullCents 구현 계획 (plan.md)
 
-> **상태: DRAFT v0.2**
+> **상태: DRAFT v0.3**
 > 작성일: 2026-03-01 | 갱신: 2026-03-01
-> 근거 문서: prd.md v0.4 | schema-design.md v0.3 | ui-architecture.md v0.2 | tech-stack-research.md
+> 근거 문서: prd.md v0.5 | schema-design.md v0.4 | ui-architecture.md v0.3 | tech-stack-research.md
 > **이 문서는 STEP 2 계획 단계입니다. 아직 구현하지 마.**
 
 ---
@@ -241,11 +241,11 @@ struct AppCache {
 
 ### 6.1 데이터 소스
 
-| 소스 | 용도 | 방식 |
-|------|------|------|
-| 쿠팡파트너스 API | 상품 검색 + 딥링크 생성 | 공식 REST API |
-| 쿠팡 웹 | 가격 이력 수집 (API 미제공 시) | reqwest + scraper |
-| 네이버 검색 API | 최저가(lprice) + 최고가(hprice) | 공식 REST API |
+| 소스 | 용도 | 방식 | 시점 |
+|------|------|------|------|
+| 쿠팡파트너스 API | 상품 검색 + 딥링크 생성 | 공식 REST API | **M1** |
+| 쿠팡 웹 | 가격 이력 수집 (API 미제공 시) | reqwest + scraper | **M1** |
+| 네이버 검색 API | 최저가(lprice) + 최고가(hprice) | 공식 REST API | **M5** (다중 쇼핑몰 비교) |
 
 ### 6.2 차단 우회 전략 (비용 0)
 
@@ -274,7 +274,19 @@ struct AppCache {
 - 첫 가격 수집 후 즉시 price_history에 기록 (기준점)
 - 이후 사용자가 URL/검색으로 추가하는 상품도 자동 추적 대상에 포함
 
-### 6.5 실패 처리
+### 6.5 기프티콘 시세 수집 (M5)
+
+| 소스 | 대상 | 방식 | 주기 |
+|------|------|------|------|
+| 기프티쇼 | 편의점/카페 기프티콘 도매가 | reqwest + scraper | 일 1회 |
+| 카카오선물하기 | 대중 브랜드 기프티콘 정가 | reqwest + scraper | 일 1회 |
+
+- 수집한 시세 → `gifticons` 테이블(M5에서 추가)에 저장
+- 교환 비율 = `도매가 / 센트당 운영 단가` → 자동 계산
+- 도매가 변동 시 교환 가격 자동 갱신
+- 초기 런칭 시 3~5종 기프티콘으로 시작, 점진 확대
+
+### 6.6 실패 처리
 
 | 상황 | 대응 |
 |------|------|
@@ -295,7 +307,7 @@ struct AppCache {
 
 ---
 
-### M1. 기반 구축 (4주)
+### M1. 기반 구축 (6주)
 
 서버 + DB + 크롤링 + 인증 + 알림. Flutter는 M2에서 시작.
 
@@ -314,11 +326,12 @@ M1-2 (에러+공통) ─────→ M1-4 (인증) ──┘                 
 - [ ] Cargo.toml 의존성 추가
 - [ ] config.rs — 환경변수 (DATABASE_URL, JWT_SECRET, COUPANG_API_KEY 등)
 - [ ] db/mod.rs — PgPool 초기화
-- [ ] `migrations/001_initial_schema.sql` — 21개 테이블 + 인덱스 + 파티셔닝 (subscriptions 제거)
+- [ ] `migrations/001_initial_schema.sql` — 23개 테이블 + 인덱스 + 파티셔닝 (subscriptions 제거, roulette_results 추가)
 - [ ] `migrations/002_seed_data.sql` — shopping_malls (2), categories (18)
+- [ ] 각 migration에 대응하는 **down migration** 작성 (`sqlx migrate revert` 지원)
 - [ ] SQLx 마이그레이션 실행 + `sqlx prepare` 검증
 
-**DoD:** `cargo build` 성공 + `sqlx migrate run` 완료 + 21개 테이블 생성 확인
+**DoD:** `cargo build` 성공 + `sqlx migrate run` 완료 + 23개 테이블 생성 확인
 
 #### M1-2. 에러 처리 + 공통 (~2일)
 - [ ] error.rs — `AppError` (thiserror + IntoResponse). 에러 코드 체계: `AUTH_001`, `PRODUCT_001` 등
@@ -336,9 +349,10 @@ M1-2 (에러+공통) ─────→ M1-4 (인증) ──┘                 
 - [ ] alert.rs — price_alerts, category_alerts, keyword_alerts
 - [ ] notification.rs
 - [ ] point.rs — user_points, point_transactions
-- [ ] reward.rs — referrals, daily_checkins
+- [ ] reward.rs — referrals, daily_checkins, roulette_results
 - [ ] event.rs — events, event_participations
 - [ ] card_discount.rs, ai_prediction.rs, popular_search.rs
+> **참고:** point_transactions 모델에 신규 transaction_type 반영: `roulette_checkin`, `roulette_event`, `gifticon_exchange`, `referral_welcome`
 - [ ] security.rs — api_access_logs, blocked_ips
 
 **DoD:** 모든 모델 `cargo build` 통과 + SQLx 컴파일타임 검증 성공
@@ -387,7 +401,11 @@ M1-2 (에러+공통) ─────→ M1-4 (인증) ──┘                 
 - [ ] CRUD `/api/v1/alerts/price`
 - [ ] CRUD `/api/v1/alerts/category`
 - [ ] CRUD `/api/v1/alerts/keyword`
-- [ ] alert_service.rs — 가격 변동 시 활성 알림 조건 평가
+- [ ] alert_service.rs — 가격 변동 시 활성 알림 조건 평가:
+  - ① `target_price`: 현재가 ≤ 사용자 지정가
+  - ② `below_average`: 현재가 < 30일 이동평균
+  - ③ `near_lowest`: 현재가 ≤ 역대 최저가 × 1.05 (+5% 이내)
+  - ④ `all_time_low`: 현재가 < 역대 최저가 (갱신)
 - [ ] notification_service.rs — 알림 생성 + 푸시 발송
 - [ ] push/apns.rs — a2 (P8 키)
 - [ ] push/fcm.rs — fcm HTTP v1
@@ -425,6 +443,7 @@ Flutter 앱 + P0(3개) + P1(8개) = **11개 기능 모두 구현**.
 - [ ] 카드 할인가 섹션
 - [ ] 단가 계산 표시
 - [ ] 하단 CTA ("N원 싸게 구매하기")
+- [ ] AI 예측 섹션 → **"곧 출시 예정" 플레이스홀더** (M5에서 실제 데이터로 교체)
 
 #### M2-6. 알림 체계 (~7일)
 - [ ] ALERT_CENTER (5탭)
@@ -474,23 +493,50 @@ Flutter 앱 + P0(3개) + P1(8개) = **11개 기능 모두 구현**.
 - [ ] 웹 정식 배포 (도메인 + HTTPS)
 - [ ] 쿠팡파트너스 커미션 정산 확인
 - [ ] SHARE_PREVIEW — 카카오톡/SNS 공유
+- [ ] **회원 탈퇴 API** — soft delete (deleted_at 설정) + 관련 데이터 비활성화
+- [ ] **데이터 익명화 크론** — 탈퇴 후 1년 경과 사용자 개인정보 익명화/삭제 (개인정보보호법)
 
-**M4 DoD:** 양대 스토어 출시 완료 + 웹 접속 가능 + 첫 커미션 발생
+**M4 DoD:** 양대 스토어 출시 완료 + 웹 접속 가능 + 첫 커미션 발생 + 탈퇴 API 동작
 
 ---
 
 ### M5. 차별화 확장 — P2 (8주)
 
+#### M5-1. 센트(¢) 보상 + 기프티콘 (~2주)
+- [ ] 센트(¢) 잔액 관리 API (`GET /api/v1/rewards/balance`)
+- [ ] 기프티콘 목록 + 동적 가격 API (`GET /api/v1/gifticons`)
+- [ ] 기프티콘 교환 API (`POST /api/v1/rewards/gifticon/exchange`)
+- [ ] 기프티콘 시세 수집 또는 수동 관리 운영 도구
+- [ ] REWARDS 화면 (센트 잔액 + 기프티콘 교환 + 거래 이력)
+
+#### M5-2. 출석체크 룰렛 (~1주)
+- [ ] 출석체크 API (`POST /api/v1/checkin`, `GET /api/v1/checkin/status`)
+- [ ] 10일 연속 출석 → 룰렛 기회 부여 로직
+- [ ] 룰렛 API (`POST /api/v1/roulette/spin`) — 확률형, 당첨 시 1¢
+- [ ] 월 최대 3회 룰렛 제한
+- [ ] DAILY_CHECKIN 화면 (캘린더 + 룰렛 UI)
+
+#### M5-3. 친구 초대 (~1주)
+- [ ] 추천 코드 공유 API + 가입 시 보상 처리 (초대자 3¢ 확정, 피초대자 1¢)
+- [ ] REFERRAL 화면 (코드 공유 + 초대 현황)
+
+#### M5-4. 이벤트/퀴즈 룰렛 (~1주)
+- [ ] 이벤트 CRUD API
+- [ ] 참여 완료 → 룰렛 기회 획득 → 확률형 룰렛으로 0~2¢ 지급
+- [ ] EVENT 화면 (이벤트 목록 + 퀴즈 + 룰렛)
+
+#### M5-5. AI 가격 예측 (~2주)
 - [ ] AI 가격 예측 ("지금 사세요/기다리세요") — 무료 제공
-- [ ] 포인트/보상 시스템 (적립/사용)
-- [ ] 출석체크 + 연속 보너스
-- [ ] 친구 초대 (추천 코드 보상)
-- [ ] 이벤트/퀴즈
-- [ ] 다중 쇼핑몰 비교 (네이버 API)
+- [ ] PRODUCT_DETAIL에 예측 섹션 활성화
+
+#### M5-6. 추가 기능 (~1주)
 - [ ] 판매 속도 급증 선제 알림
 - [ ] N일만에 최저가 배지
+- [ ] 다중 쇼핑몰 비교 (네이버 API 연동)
 - [ ] 카카오톡 알림 채널
 - [ ] 절약 금액 대시보드
+
+**M5 DoD:** 센트 적립/교환 E2E 동작 + 룰렛 확률 정상 + AI 예측 표시 + 전 P2 기능 QA 통과
 
 ---
 
@@ -560,6 +606,17 @@ Retry-After: 30  (429 응답 시)
 | **Flutter Provider** | 상태 변경 로직 | `riverpod test` | 60%+ |
 | **E2E** | 수동 QA (M3) | 체크리스트 기반 | 전 기능 |
 
+### 환경별 DB 분리
+
+| 환경 | DB 이름 | 용도 | .env 전환 |
+|------|---------|------|----------|
+| **dev** | `pullcents_dev` | 로컬 개발. 테스트 데이터 자유 생성/삭제 | `DATABASE_URL=...pullcents_dev` |
+| **test** | `pullcents_test` | 자동 테스트 전용. 트랜잭션 롤백으로 격리 | 테스트 코드에서 자동 전환 |
+| **prod** | `pullcents` | 실서비스 운영. pg_dump 백업 대상 | `DATABASE_URL=...pullcents` |
+
+- `.env.dev`, `.env.prod` 분리. 서버 시작 시 `--env` 플래그 또는 `APP_ENV` 환경변수로 전환
+- 모든 `.env*` 파일은 `.gitignore` 처리
+
 ### 테스트 DB
 - `pullcents_test` 별도 DB 사용
 - 각 통합 테스트는 트랜잭션 내 실행 → 롤백 (테스트 간 격리)
@@ -608,6 +665,5 @@ M2 주석 → 구현 → M3 → M4 → M5
 
 ---
 
-> **다음 행동:** plan.md v0.2 리뷰 후 피드백을 주세요.
-> 승인되면 M0 사전 준비 시작 + STEP 3 (M1-1 주석달기) 진입.
+> **다음 행동:** plan.md v0.3 리뷰 후 승인되면 M0 사전 준비 시작 + STEP 3 (M1-1 주석달기) 진입.
 > **아직 구현하지 마.**
